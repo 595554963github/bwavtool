@@ -1,7 +1,7 @@
 # bwavtool
 Nintendo bwav Codec
 
-supported:pcm16 、dspadpcm 、libopus
+supported: pcm16 、dspadpcm 、libopus
 
 usage:
 
