@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="bwavtool.vcxproj" Id="5dd0de77-4519-410e-a28a-11de1e593916" />
+</Solution>
