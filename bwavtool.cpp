@@ -368,14 +368,44 @@ static void decodeOpusChannel(const uint8_t* nxopData, size_t nxopSize, int sr, 
     opus_decoder_destroy(dec);
 }
 
+static bool isValidOpusSampleRate(int sr) {
+    return sr == 48000 || sr == 24000 || sr == 16000 || sr == 12000 || sr == 8000;
+}
+
+static std::vector<int16_t> resample(const std::vector<int16_t>& input, int fromRate, int toRate) {
+    double ratio = (double)toRate / fromRate;
+    int newLength = (int)(input.size() * ratio);
+    std::vector<int16_t> output(newLength);
+    for (int i = 0; i < newLength; i++) {
+        double srcPos = i / ratio;
+        int idx = (int)srcPos;
+        double frac = srcPos - idx;
+        if (idx + 1 < (int)input.size())
+            output[i] = (int16_t)lround(input[idx] * (1.0 - frac) + input[idx + 1] * frac);
+        else if (idx < (int)input.size())
+            output[i] = input[idx];
+    }
+    return output;
+}
+
 struct OpusEncodedPacket {
     std::vector<uint8_t> data;
     uint32_t finalRange = 0;
 };
 
 static std::vector<uint8_t> encodeOpusChannel(const int16_t* pcm, int sampleCount, int sr, int& preSkipOut) {
+    int actualSr = sr;
+    std::vector<int16_t> resampled;
+
+    if (!isValidOpusSampleRate(sr)) {
+        resampled = resample(std::vector<int16_t>(pcm, pcm + sampleCount), sr, 48000);
+        pcm = resampled.data();
+        sampleCount = (int)resampled.size();
+        actualSr = 48000;
+    }
+
     int error;
-    OpusEncoder* enc = opus_encoder_create(sr, 1, OPUS_APPLICATION_AUDIO, &error);
+    OpusEncoder* enc = opus_encoder_create(actualSr, 1, OPUS_APPLICATION_AUDIO, &error);
     if (error != OPUS_OK) { fprintf(stderr, "opus_encoder_create: %s\n", opus_strerror(error)); return {}; }
     opus_encoder_ctl(enc, OPUS_SET_BITRATE(96000));
     opus_encoder_ctl(enc, OPUS_SET_VBR(1));
@@ -383,7 +413,7 @@ static std::vector<uint8_t> encodeOpusChannel(const int16_t* pcm, int sampleCoun
     opus_encoder_ctl(enc, OPUS_GET_LOOKAHEAD(&preSkipOut));
 
     int frameDurationMs = 20;
-    int frameSize = (sr / 1000) * frameDurationMs;
+    int frameSize = (actualSr / 1000) * frameDurationMs;
     uint8_t buf[1275];
 
     std::vector<OpusEncodedPacket> packets;
@@ -412,7 +442,7 @@ static std::vector<uint8_t> encodeOpusChannel(const int16_t* pcm, int sampleCoun
     uint8_t ver = 0; wb(&ver, 1);
     uint8_t ch = 1; wb(&ch, 1);
     wu16le(0);
-    wu32le(sr);
+    wu32le(actualSr);
     wu32le(32);
     wu32le(0);
     wu32le(0);
@@ -562,9 +592,12 @@ static bool readBwav(const char* path, BwavInfo& b) {
 
 static bool writeBwav(const char* path, const BwavInfo& b) {
     int nch = b.nch;
+    int actualSr = b.sr;
+    size_t actualSamples = b.samples;
 
     std::vector<std::vector<uint8_t>> adpcm(nch);
     std::vector<std::vector<uint8_t>> opusNx(nch);
+    std::vector<std::vector<int16_t>> resampledPcm;
     uint32_t dataBytes = 0;
 
     if (b.codec == 1) {
@@ -577,9 +610,19 @@ static bool writeBwav(const char* path, const BwavInfo& b) {
         dataBytes = (uint32_t)adpcm[0].size();
     }
     else if (b.codec == 3) {
+        if (!isValidOpusSampleRate(b.sr)) {
+            resampledPcm.resize(nch);
+            for (int c = 0; c < nch; c++)
+                resampledPcm[c] = resample(b.pcm[c], (int)b.sr, 48000);
+            actualSr = 48000;
+            actualSamples = resampledPcm[0].size();
+        }
+
+        const std::vector<std::vector<int16_t>>& opusPcm = resampledPcm.empty() ? b.pcm : resampledPcm;
+
         for (int c = 0; c < nch; c++) {
             int preSkip = 0;
-            opusNx[c] = encodeOpusChannel(b.pcm[c].data(), (int)b.samples, b.sr, preSkip);
+            opusNx[c] = encodeOpusChannel(opusPcm[c].data(), (int)opusPcm[c].size(), actualSr, preSkip);
             if (opusNx[c].empty()) { fprintf(stderr, "Opus encode failed for channel %d\n", c); return false; }
         }
         dataBytes = 0;
@@ -606,15 +649,15 @@ static bool writeBwav(const char* path, const BwavInfo& b) {
     for (int c = 0; c < nch; c++) {
         wu16(b.codec - 1);
         wu16(nch > 1 ? (c % 2) : 2);
-        wu32(b.sr);
-        wu32((uint32_t)b.samples);
-        wu32((uint32_t)b.samples);
+        wu32((uint32_t)actualSr);
+        wu32((uint32_t)actualSamples);
+        wu32((uint32_t)actualSamples);
         if (b.codec == 2) { for (int i = 0; i < 16; i++) wu16((uint16_t)b.coefs[c][i]); }
         else { for (int i = 0; i < 8; i++) wu32(0); }
         wu32(chOff[c]);
         wu32(chOff[c]);
         wu32(1);
-        if (b.loopFlag) wu32((uint32_t)b.samples); else wu32(0xFFFFFFFF);
+        if (b.loopFlag) wu32((uint32_t)actualSamples); else wu32(0xFFFFFFFF);
         wu32(b.loopStart);
         wu16(b.codec == 2 ? adpcm[c][0] : 0);
         wu16(0);
